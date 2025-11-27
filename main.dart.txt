@@ -1,0 +1,570 @@
+import 'dart:async';
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await loadStoredValues();
+  runApp(AxiomCalculatorApp());
+}
+
+// ---------------- Persistent Storage ----------------
+SharedPreferences? prefs;
+
+Future<void> loadStoredValues() async {
+  prefs = await SharedPreferences.getInstance();
+}
+
+// Helper to save values
+void saveValue(String key, String value) {
+  prefs?.setString(key, value);
+}
+
+// Helper to load values
+String loadValue(String key, {String defaultValue = '0'}) {
+  return prefs?.getString(key) ?? defaultValue;
+}
+
+// ---------------- Value Notifiers ----------------
+ValueNotifier<double> solPriceNotifier = ValueNotifier(0.0);
+ValueNotifier<double> entryPriceNotifier = ValueNotifier(0.0);
+ValueNotifier<double> exitPriceNotifier = ValueNotifier(0.0);
+
+class AxiomCalculatorApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Axiom Calculator',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: HomeScreen(),
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  @override
+  _HomeScreenState createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  int _currentIndex = 0;
+
+  final TextEditingController investmentController = TextEditingController();
+  final TextEditingController entryController = TextEditingController();
+  final TextEditingController exitController = TextEditingController();
+
+  // Preset fee controllers
+  final Map<String, TextEditingController> buyPriority = {
+    'Preset 1': TextEditingController(),
+    'Preset 2': TextEditingController(),
+    'Preset 3': TextEditingController(),
+  };
+  final Map<String, TextEditingController> buyBribe = {
+    'Preset 1': TextEditingController(),
+    'Preset 2': TextEditingController(),
+    'Preset 3': TextEditingController(),
+  };
+  final Map<String, TextEditingController> sellPriority = {
+    'Preset 1': TextEditingController(),
+    'Preset 2': TextEditingController(),
+    'Preset 3': TextEditingController(),
+  };
+  final Map<String, TextEditingController> sellBribe = {
+    'Preset 1': TextEditingController(),
+    'Preset 2': TextEditingController(),
+    'Preset 3': TextEditingController(),
+  };
+
+  String selectedPreset = 'Preset 1';
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Load stored values
+    investmentController.text = loadValue('investment', defaultValue: '0');
+    entryController.text = loadValue('entryPrice', defaultValue: '0');
+    exitController.text = loadValue('exitPrice', defaultValue: '0');
+
+    entryPriceNotifier.value = double.tryParse(entryController.text) ?? 0.0;
+    exitPriceNotifier.value = double.tryParse(exitController.text) ?? 0.0;
+
+    // Initialize presets
+    for (var preset in ['Preset 1', 'Preset 2', 'Preset 3']) {
+      buyPriority[preset]!.text = loadValue(
+          'buyPriority_$preset',
+          defaultValue: preset == 'Preset 1'
+              ? '0.01'
+              : preset == 'Preset 2'
+              ? '0.001'
+              : '0.0001');
+      buyBribe[preset]!.text = loadValue(
+          'buyBribe_$preset',
+          defaultValue: preset == 'Preset 1'
+              ? '0.01'
+              : preset == 'Preset 2'
+              ? '0.001'
+              : '0.0001');
+      sellPriority[preset]!.text = loadValue(
+          'sellPriority_$preset',
+          defaultValue: preset == 'Preset 1'
+              ? '0.01'
+              : preset == 'Preset 2'
+              ? '0.001'
+              : '0.0001');
+      sellBribe[preset]!.text = loadValue(
+          'sellBribe_$preset',
+          defaultValue: preset == 'Preset 1'
+              ? '0.01'
+              : preset == 'Preset 2'
+              ? '0.001'
+              : '0.0001');
+    }
+
+    // Controllers listeners
+    investmentController.addListener(() {
+      saveValue('investment', investmentController.text);
+      setState(() {});
+    });
+    entryController.addListener(() {
+      double val = double.tryParse(entryController.text) ?? 0.0;
+      entryPriceNotifier.value = val;
+      saveValue('entryPrice', entryController.text);
+      setState(() {});
+    });
+    exitController.addListener(() {
+      double val = double.tryParse(exitController.text) ?? 0.0;
+      exitPriceNotifier.value = val;
+      saveValue('exitPrice', exitController.text);
+      setState(() {});
+    });
+
+    for (var preset in ['Preset 1', 'Preset 2', 'Preset 3']) {
+      buyPriority[preset]!.addListener(() {
+        saveValue('buyPriority_$preset', buyPriority[preset]!.text);
+        setState(() {});
+      });
+      buyBribe[preset]!.addListener(() {
+        saveValue('buyBribe_$preset', buyBribe[preset]!.text);
+        setState(() {});
+      });
+      sellPriority[preset]!.addListener(() {
+        saveValue('sellPriority_$preset', sellPriority[preset]!.text);
+        setState(() {});
+      });
+      sellBribe[preset]!.addListener(() {
+        saveValue('sellBribe_$preset', sellBribe[preset]!.text);
+        setState(() {});
+      });
+    }
+
+    // Load last Sol price
+    double lastPrice =
+        double.tryParse(loadValue('lastSolPrice', defaultValue: '0')) ?? 0.0;
+    solPriceNotifier.value = lastPrice;
+
+    // Start live price updater
+    fetchSolPrice(); // this now auto-repeats every 2 seconds
+  }
+
+  @override
+  void dispose() {
+    investmentController.dispose();
+    entryController.dispose();
+    exitController.dispose();
+    super.dispose();
+  }
+
+  // ---------------- LIVE SOL PRICE ----------------
+  Future<void> fetchSolPrice() async {
+    try {
+      final res = await http.get(
+        Uri.parse('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT'),
+      );
+
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body);
+        double price = double.tryParse(data['price']) ?? 0.0;
+
+        solPriceNotifier.value = price;
+        saveValue('lastSolPrice', price.toString());
+      } else {
+        print('Failed to fetch SOL price (status code ${res.statusCode})');
+      }
+    } catch (e) {
+      print("Error fetching SOL price: $e");
+    } finally {
+      // Retry after 5 seconds (Binance allows frequent requests)
+      Future.delayed(Duration(seconds: 5), fetchSolPrice);
+    }
+  }
+
+  final List<Widget> _screens = [];
+
+  @override
+  Widget build(BuildContext context) {
+    _screens.clear();
+    _screens.addAll([
+      feesDetailsTab(),
+      tradeDetailsTab(),
+      valuesTab(),
+      breakEvenChartTab(),
+      roiMultiplierChartTab(),
+    ]);
+
+    return Scaffold(
+      appBar: AppBar(title: Text('Axiom Calculator')),
+      body: _screens[_currentIndex],
+      bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
+        currentIndex: _currentIndex,
+        selectedItemColor: Colors.blue,
+        items: const [
+          BottomNavigationBarItem(
+              icon: Icon(Icons.receipt_long), label: 'Fees Details'),
+          BottomNavigationBarItem(icon: Icon(Icons.show_chart), label: 'Trade Details'),
+          BottomNavigationBarItem(icon: Icon(Icons.calculate), label: 'Values'),
+          BottomNavigationBarItem(icon: Icon(Icons.bar_chart), label: 'Break-even Chart'),
+          BottomNavigationBarItem(icon: Icon(Icons.multiline_chart), label: 'ROI Multiplier Chart'),
+        ],
+        onTap: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
+      ),
+    );
+  }
+
+  Widget feeRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6.0),
+      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text(label),
+        Text(value),
+      ]),
+    );
+  }
+
+  // ---------------- VALUES TAB ----------------
+  Widget valuesTab() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Values',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              SizedBox(height: 20),
+              TextField(
+                controller: investmentController,
+                keyboardType: TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                    labelText: 'Investment Amount',
+                    suffixText: 'USD',
+                    border: OutlineInputBorder()),
+              ),
+              SizedBox(height: 8),
+              TextField(
+                controller: entryController,
+                keyboardType: TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                    labelText: 'Token Entry Price',
+                    suffixText: 'USD',
+                    border: OutlineInputBorder()),
+              ),
+              SizedBox(height: 8),
+              TextField(
+                controller: exitController,
+                keyboardType: TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                    labelText: 'Token Exit Price',
+                    suffixText: 'USD',
+                    border: OutlineInputBorder()),
+              ),
+              SizedBox(height: 12),
+              InputDecorator(
+                decoration: InputDecoration(
+                    labelText: 'Select Preset', border: OutlineInputBorder()),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: selectedPreset,
+                    isExpanded: true,
+                    items: ['Preset 1', 'Preset 2', 'Preset 3']
+                        .map((preset) =>
+                        DropdownMenuItem(value: preset, child: Text(preset)))
+                        .toList(),
+                    onChanged: (value) {
+                      setState(() {
+                        selectedPreset = value!;
+                      });
+                    },
+                  ),
+                ),
+              ),
+              SizedBox(height: 15),
+              Text('Buying Fees (SOL)',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              SizedBox(height: 12),
+              TextField(
+                  controller: buyPriority[selectedPreset],
+                  keyboardType: TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                      labelText: 'Buying Priority Fees (SOL)',
+                      border: OutlineInputBorder())),
+              SizedBox(height: 8),
+              TextField(
+                  controller: buyBribe[selectedPreset],
+                  keyboardType: TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                      labelText: 'Buying Bribe Fees (SOL)',
+                      border: OutlineInputBorder())),
+              SizedBox(height: 15),
+              Text('Selling Fees (SOL)',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              SizedBox(height: 12),
+              TextField(
+                  controller: sellPriority[selectedPreset],
+                  keyboardType: TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                      labelText: 'Selling Priority Fees (SOL)',
+                      border: OutlineInputBorder())),
+              SizedBox(height: 8),
+              TextField(
+                  controller: sellBribe[selectedPreset],
+                  keyboardType: TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                      labelText: 'Selling Bribe Fees (SOL)',
+                      border: OutlineInputBorder())),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ---------------- FEES DETAILS TAB ----------------
+  Widget feesDetailsTab() {
+    return ValueListenableBuilder<double>(
+      valueListenable: solPriceNotifier,
+      builder: (_, solPrice, __) {
+        final investment = double.tryParse(investmentController.text) ?? 0.0;
+        final tokensAcquired = (entryPriceNotifier.value != 0.0)
+            ? investment / entryPriceNotifier.value
+            : 0.0;
+
+        final buyPriorityVal =
+            double.tryParse(buyPriority[selectedPreset]!.text) ?? 0.0;
+        final buyBribeVal =
+            double.tryParse(buyBribe[selectedPreset]!.text) ?? 0.0;
+        final sellPriorityVal =
+            double.tryParse(sellPriority[selectedPreset]!.text) ?? 0.0;
+        final sellBribeVal =
+            double.tryParse(sellBribe[selectedPreset]!.text) ?? 0.0;
+
+        final buyTxnUSD = investment * 0.01;
+        final sellTxnUSD = tokensAcquired * (exitPriceNotifier.value) * 0.01;
+
+        final buyPriorityUSD = buyPriorityVal * solPrice;
+        final buyBribeUSD = buyBribeVal * solPrice;
+        final sellPriorityUSD = sellPriorityVal * solPrice;
+        final sellBribeUSD = sellBribeVal * solPrice;
+
+        final totalBuyUSD = buyPriorityUSD + buyBribeUSD + buyTxnUSD;
+        final totalSellUSD = sellPriorityUSD + sellBribeUSD + sellTxnUSD;
+
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: ListView(
+            children: [
+              Text('Fees Details',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              SizedBox(height: 20),
+              Text('Buying Fees',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              feeRow('Buying Priority Fees (SOL)', buyPriorityVal.toStringAsFixed(6)),
+              feeRow('Priority Fees (USD)', buyPriorityUSD.toStringAsFixed(6)),
+              feeRow('Bribing Bribe Fees (SOL)', buyBribeVal.toStringAsFixed(6)),
+              feeRow('Bribe Fees (USD)', buyBribeUSD.toStringAsFixed(6)),
+              feeRow('Buying Transaction Fees', '1%'),
+              feeRow('Buying Transaction Fees (USD)', buyTxnUSD.toStringAsFixed(6)),
+              feeRow('Total Buying Fees', totalBuyUSD.toStringAsFixed(6)),
+              SizedBox(height: 20),
+              Text('Selling Fees',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              feeRow('Selling Priority Fees (SOL)', sellPriorityVal.toStringAsFixed(6)),
+              feeRow('Priority Fees (USD)', sellPriorityUSD.toStringAsFixed(6)),
+              feeRow('Selling Bribe Fees (SOL)', sellBribeVal.toStringAsFixed(6)),
+              feeRow('Bribe Fees (USD)', sellBribeUSD.toStringAsFixed(6)),
+              feeRow('Selling Transaction Fees', '1%'),
+              feeRow('Selling Transaction Fees (USD)', sellTxnUSD.toStringAsFixed(6)),
+              feeRow('Total Selling Fees', totalSellUSD.toStringAsFixed(6)),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ---------------- TRADE DETAILS TAB ----------------
+  Widget tradeDetailsTab() {
+    return ValueListenableBuilder<double>(
+      valueListenable: solPriceNotifier,
+      builder: (_, solPrice, __) {
+        final investment = double.tryParse(investmentController.text) ?? 0.0;
+        final entryPrice = entryPriceNotifier.value;
+        final exitPrice = exitPriceNotifier.value;
+        final tokensAcquired =
+        entryPrice != 0.0 ? investment / entryPrice : 0.0;
+
+        final buyPriorityVal =
+            double.tryParse(buyPriority[selectedPreset]!.text) ?? 0.0;
+        final buyBribeVal =
+            double.tryParse(buyBribe[selectedPreset]!.text) ?? 0.0;
+        final sellPriorityVal =
+            double.tryParse(sellPriority[selectedPreset]!.text) ?? 0.0;
+        final sellBribeVal =
+            double.tryParse(sellBribe[selectedPreset]!.text) ?? 0.0;
+
+        final buyTxnUSD = investment * 0.01;
+        final sellTxnUSD = tokensAcquired * exitPrice * 0.01;
+
+        final totalBuyUSD =
+            buyPriorityVal * solPrice + buyBribeVal * solPrice + buyTxnUSD;
+        final totalSellUSD =
+            sellPriorityVal * solPrice + sellBribeVal * solPrice + sellTxnUSD;
+
+        final totalTransactionCost = totalBuyUSD + totalSellUSD;
+        final totalAmountCredited = tokensAcquired * exitPrice - totalSellUSD;
+        final netProfit = totalAmountCredited - investment - totalBuyUSD;
+        final profitPercent = investment != 0.0 ? (netProfit / investment) * 100 : 0.0;
+
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: ListView(children: [
+            Text('Trade Details',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            SizedBox(height: 20),
+            feeRow('Solana-USD Rate', solPrice.toStringAsFixed(6)),
+            feeRow('Investment Amount', investment.toStringAsFixed(6)),
+            feeRow('Amount In SOL', (investment / (solPrice == 0 ? 1 : solPrice)).toStringAsFixed(6)),
+            feeRow('Token Entry Price', entryPrice.toStringAsFixed(10)),
+            feeRow('Number of Tokens Acquired', tokensAcquired.toStringAsFixed(6)),
+            feeRow('Token Exit Price', exitPrice.toStringAsFixed(10)),
+            feeRow('Total Transaction Cost', totalTransactionCost.toStringAsFixed(6)),
+            feeRow('Profit', netProfit.toStringAsFixed(6)),
+            feeRow('Total Amount Credited', totalAmountCredited.toStringAsFixed(6)),
+            feeRow('Net Profit', netProfit.toStringAsFixed(6)),
+            feeRow('Profit Percentage', profitPercent.toStringAsFixed(2) + '%'),
+          ]),
+        );
+      },
+    );
+  }
+
+  // ---------------- BREAK-EVEN CHART TAB ----------------
+  Widget breakEvenChartTab() {
+    return ValueListenableBuilder<double>(
+      valueListenable: solPriceNotifier,
+      builder: (_, solPrice, __) {
+        final investment = double.tryParse(investmentController.text) ?? 0.0;
+        final entryPrice = entryPriceNotifier.value;
+
+        final buyPriorityUSD = (double.tryParse(buyPriority[selectedPreset]!.text) ?? 0.0) * solPrice;
+        final buyBribeUSD = (double.tryParse(buyBribe[selectedPreset]!.text) ?? 0.0) * solPrice;
+        final sellPriorityUSD = (double.tryParse(sellPriority[selectedPreset]!.text) ?? 0.0) * solPrice;
+        final sellBribeUSD = (double.tryParse(sellBribe[selectedPreset]!.text) ?? 0.0) * solPrice;
+        final buyTxnUSD = investment * 0.01;
+
+        final totalCost = investment + buyPriorityUSD + buyBribeUSD + buyTxnUSD;
+        final breakEvenProfitPercent = 0.0; // currently 0
+        final breakEvenExitPrice = entryPrice; // initial 0
+
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: ListView(children: [
+            Text('Break-even Chart',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            SizedBox(height: 20),
+            feeRow('Investment (USD)', investment.toStringAsFixed(10)),
+            feeRow('Token Entry Price (USD)', entryPrice.toStringAsFixed(10)),
+            feeRow('Transaction Cost (USD)', totalCost.toStringAsFixed(10)),
+            feeRow('Break-even Amount (USD)', totalCost.toStringAsFixed(10)),
+            feeRow('Break-even Profit %', breakEvenProfitPercent.toStringAsFixed(2) + '%'),
+            feeRow('Break-even Exit Price (USD)', breakEvenExitPrice.toStringAsFixed(10)),
+          ]),
+        );
+      },
+    );
+  }
+  
+  // ---------------- ROI MULTIPLIER CHART TAB (REVISED) ----------------
+  Widget roiMultiplierChartTab() {
+    final multipliers = [
+      1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6,
+      6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10
+    ];
+
+    return ValueListenableBuilder<double>(
+      valueListenable: solPriceNotifier,
+      builder: (_, solPrice, __) {
+        final investment = double.tryParse(investmentController.text) ?? 0.0;
+        final entryPrice = entryPriceNotifier.value;
+        final exitPrice = exitPriceNotifier.value;
+
+        final buyPriorityUSD = (double.tryParse(buyPriority[selectedPreset]!.text) ?? 0.0) * solPrice;
+        final buyBribeUSD = (double.tryParse(buyBribe[selectedPreset]!.text) ?? 0.0) * solPrice;
+        final sellPriorityUSD = (double.tryParse(sellPriority[selectedPreset]!.text) ?? 0.0) * solPrice;
+        final sellBribeUSD = (double.tryParse(sellBribe[selectedPreset]!.text) ?? 0.0) * solPrice;
+
+        final buyTxnUSD = investment * 0.01;
+
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: ListView(
+            children: [
+              Text('ROI Multiplier Chart',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              SizedBox(height: 20),
+              ...multipliers.map((multiplier) {
+                final sellTxnUSD = investment * multiplier * 0.01;
+                final txnValue = investment * multiplier +
+                    buyPriorityUSD + buyBribeUSD + buyTxnUSD +
+                    sellPriorityUSD + sellBribeUSD + sellTxnUSD;
+                final profitPercent = investment != 0.0 ? (txnValue / investment) * 100 : 0.0;
+                final exitPriceCalc = entryPrice * profitPercent / 100;
+
+                return Card(
+                  margin: EdgeInsets.symmetric(vertical: 8),
+                  elevation: 3,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Multiplier: x$multiplier',
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        SizedBox(height: 8),
+                        Text('Transaction Value: \$${txnValue.toStringAsFixed(6)}'),
+                        Text('Profit %: ${profitPercent.toStringAsFixed(2)}%'),
+                        Text('Exit Price: \$${exitPriceCalc.toStringAsFixed(10)}'),
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
