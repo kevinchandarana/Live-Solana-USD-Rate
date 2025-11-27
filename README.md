@@ -1,1 +1,1 @@
-# Live-Solana-USD-Rate
+Hello everyone! I am trying to make a custom app for myself that would allow me to do some quick calculations while I am using the Axiom platform. This app will help me get my numbers right before I get in and get out of the trade quickly. I am mostly happy with this app but there's just one feature, that I have totally failed to add. I want a field that gives me live Solana to USD rate so I can base my calculations accurately on it. The field is on Trade Details tab. It is labeled as Solana-USD Rate. Any help would be deeply appreciated.
